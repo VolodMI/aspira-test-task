@@ -8,11 +8,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Slf4j
 @Service
@@ -26,11 +30,14 @@ public class LeonService {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'")
                     .withZone(ZoneOffset.UTC);
 
+    private final ExecutorService executorService = Executors.newFixedThreadPool(3);
+    private final Scheduler scheduler = Schedulers.fromExecutorService(executorService);
+
     public void startParsing() {
         client.getSports()
                 .flatMapMany(this::parseSportsJson)
-                .flatMap(this::processLeague, 3)
-                .doOnComplete(() -> log.info("Parsing completed!"))
+                .flatMap(this::processLeague)
+                .doOnComplete(this::shutdownExecutor)
                 .onErrorContinue((error, obj) -> log.error("Error during parsing: {}", error.getMessage()))
                 .subscribe();
     }
@@ -47,13 +54,7 @@ public class LeonService {
                 .filter(sport -> targetSports.contains(sport.path("name").asText()))
                 .flatMap(sport -> Flux.fromIterable(sport.path("regions"))
                         .flatMap(region -> Flux.fromIterable(region.path("leagues"))
-                                .filter(league -> {
-                                    if (topLeaguesOnly) {
-                                        return league.path("top").asBoolean();
-                                    } else {
-                                        return true;
-                                    }
-                                })
+                                .filter(league -> !topLeaguesOnly || league.path("top").asBoolean())
                                 .map(league -> buildLeagueNode(sport, league))
                         )
                 );
@@ -77,13 +78,16 @@ public class LeonService {
                 .flatMap(event -> {
                     long eventId = event.path("id").asLong();
                     return client.getFullEventInfo(eventId)
-                            .flatMap(fullEvent -> Mono.fromRunnable(() -> printEvent(league, fullEvent)).then())
+                            .flatMap(fullEvent -> Mono.fromRunnable(() -> printEvent(league, fullEvent))
+                                    .subscribeOn(scheduler)
+                                    .then())
                             .onErrorResume(e -> {
                                 log.error("Failed to fetch full event info for eventId {}: {}", eventId, e.getMessage());
                                 return Mono.empty();
                             });
                 }, 3);
     }
+
 
     private void printEvent(LeagueNode league, JsonNode event) {
         String matchName = event.path("name").asText();
@@ -113,6 +117,10 @@ public class LeonService {
             }
         }
         System.out.println();
+    }
+
+    private void shutdownExecutor() {
+        executorService.shutdown();
     }
 
     private String indent(int level) {
