@@ -1,8 +1,11 @@
 package com.task.leonparser.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.task.leonparser.client.LeonApiClient;
 import com.task.leonparser.config.LeonParserProperties;
+import com.task.leonparser.model.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -21,6 +24,7 @@ public class LeonService {
 
     private final LeonApiClient client;
     private final LeonParserProperties properties;
+    private final ObjectMapper objectMapper;
 
     private static final DateTimeFormatter UTC_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'")
@@ -30,12 +34,12 @@ public class LeonService {
         client.getSports()
                 .flatMapMany(this::parseSportsJson)
                 .flatMap(this::processLeague, 3)
-                .doOnComplete(() -> log.info("Parsing completed!"))
+                .doOnComplete(() -> log.info("Parsing completed"))
                 .onErrorContinue((error, obj) -> log.error("Error during parsing: {}", error.getMessage()))
                 .subscribe();
     }
 
-    private Flux<LeagueNode> parseSportsJson(JsonNode sportsJson) {
+    private Flux<League> parseSportsJson(JsonNode sportsJson) {
         if (sportsJson == null || !sportsJson.isArray()) {
             return Flux.empty();
         }
@@ -43,71 +47,68 @@ public class LeonService {
         List<String> targetSports = properties.getTargetSports();
         boolean topLeaguesOnly = properties.isTopLeaguesOnly();
 
-        return Flux.fromIterable(sportsJson)
-                .filter(sport -> targetSports.contains(sport.path("name").asText()))
-                .flatMap(sport -> Flux.fromIterable(sport.path("regions"))
-                        .flatMap(region -> Flux.fromIterable(region.path("leagues"))
-                                .filter(league -> {
-                                    if (topLeaguesOnly) {
-                                        return league.path("top").asBoolean();
-                                    } else {
-                                        return true;
-                                    }
-                                })
-                                .map(league -> buildLeagueNode(sport, league))
-                        )
-                );
+        try {
+            List<Sport> sports = objectMapper.readValue(sportsJson.traverse(), new TypeReference<>() {
+            });
+            return Flux.fromIterable(sports)
+                    .filter(sport -> targetSports.contains(sport.getName()))
+                    .flatMap(sport -> Flux.fromIterable(sport.getRegions()))
+                    .flatMap(region -> Flux.fromIterable(region.getLeagues()))
+                    .filter(league -> !topLeaguesOnly || league.isTop());
+        } catch (Exception e) {
+            log.error("Error parsing sports JSON: {}", e.getMessage());
+            return Flux.empty();
+        }
     }
 
-    private LeagueNode buildLeagueNode(JsonNode sportNode, JsonNode leagueNode) {
-        return new LeagueNode(
-                sportNode.path("name").asText(),
-                leagueNode.path("name").asText(),
-                leagueNode.path("id").asLong()
-        );
-    }
-
-    private Flux<Void> processLeague(LeagueNode league) {
-        return client.getMatchesByLeague(league.leagueId())
+    private Flux<Void> processLeague(League league) {
+        return client.getMatchesByLeague(league.getId())
                 .flatMapMany(json -> {
-                    JsonNode events = json.path("events");
-                    return (events.isArray()) ? Flux.fromIterable(events) : Flux.empty();
+                    try {
+                        List<Match> matches = objectMapper.readValue(json.path("events").traverse(), new TypeReference<>() {
+                        });
+                        return Flux.fromIterable(matches);
+                    } catch (Exception e) {
+                        log.error("Error parsing matches: {}", e.getMessage());
+                        return Flux.empty();
+                    }
                 })
                 .take(properties.getMatchesLimit())
-                .flatMap(event -> {
-                    long eventId = event.path("id").asLong();
-                    return client.getFullEventInfo(eventId)
-                            .flatMap(fullEvent -> Mono.fromRunnable(() -> printEvent(league, fullEvent)).then())
-                            .onErrorResume(e -> {
-                                log.error("Failed to fetch full event info for eventId {}: {}", eventId, e.getMessage());
-                                return Mono.empty();
-                            });
-                }, 3);
+                .flatMap(match -> client.getFullEventInfo(match.getId())
+                                .flatMap(fullEvent -> {
+                                    try {
+                                        Match event = objectMapper.readValue(fullEvent.traverse(), Match.class);
+                                        return Mono.fromRunnable(() -> printEvent(league, event)).then(); // <--- ось тут
+                                    } catch (Exception e) {
+                                        log.error("Error parsing event: {}", e.getMessage());
+                                        return Mono.empty();
+                                    }
+                                })
+                                .onErrorResume(e -> {
+                                    log.error("Failed to fetch full event info: {}", e.getMessage());
+                                    return Mono.empty();
+                                })
+                        , 3);
     }
 
-    private void printEvent(LeagueNode league, JsonNode event) {
-        String matchName = event.path("name").asText();
-        long kickoffTimestamp = event.path("kickoff").asLong();
-        long eventId = event.path("id").asLong();
-        String kickoffTime = UTC_FORMATTER.format(Instant.ofEpochSecond(kickoffTimestamp));
+    private void printEvent(League league, Match event) {
+        long kickoffTimestamp = event.getKickoff();
+        Instant kickoffInstant = kickoffTimestamp > 9999999999L
+                ? Instant.ofEpochMilli(kickoffTimestamp)
+                : Instant.ofEpochSecond(kickoffTimestamp);
+        String kickoffTime = UTC_FORMATTER.format(kickoffInstant);
 
-        System.out.println(indent(0) + league.sportName() + ", " + league.leagueName());
-        System.out.println(indent(1) + matchName + ", " + kickoffTime + ", " + eventId);
+        System.out.println(indent(0) + "Sport/League: " + league.getName());
+        System.out.println(indent(1) + event.getName() + ", " + kickoffTime + ", " + event.getId());
 
-        JsonNode markets = event.path("markets");
-        if (markets.isArray()) {
-            for (JsonNode market : markets) {
-                String marketName = market.path("name").asText();
-                System.out.println(indent(2) + marketName);
-
-                JsonNode runners = market.path("runners");
-                if (runners.isArray()) {
-                    for (JsonNode runner : runners) {
-                        String outcomeName = runner.path("name").asText();
-                        double price = runner.path("price").asDouble();
-                        long outcomeId = runner.path("id").asLong();
-
-                        System.out.println(indent(3) + outcomeName + ", " + price + ", " + outcomeId);
+        List<Market> markets = event.getMarkets();
+        if (markets != null) {
+            for (Market market : markets) {
+                System.out.println(indent(2) + market.getName());
+                List<Runner> runners = market.getRunners();
+                if (runners != null) {
+                    for (Runner runner : runners) {
+                        System.out.println(indent(3) + runner.getName() + ", " + runner.getPrice() + ", " + runner.getId());
                     }
                 }
             }
@@ -115,10 +116,8 @@ public class LeonService {
         System.out.println();
     }
 
+
     private String indent(int level) {
         return " ".repeat(level * 4);
-    }
-
-    private record LeagueNode(String sportName, String leagueName, long leagueId) {
     }
 }
