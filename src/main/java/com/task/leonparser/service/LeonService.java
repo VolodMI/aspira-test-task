@@ -88,8 +88,13 @@ public class LeonService {
     private void printEvent(LeagueNode league, JsonNode event) {
         String matchName = event.path("name").asText();
         long kickoffTimestamp = event.path("kickoff").asLong();
+
+        Instant kickoffInstant = kickoffTimestamp > 9999999999L
+                ? Instant.ofEpochMilli(kickoffTimestamp)
+                : Instant.ofEpochSecond(kickoffTimestamp);
+
+        String kickoffTime = UTC_FORMATTER.format(kickoffInstant);
         long eventId = event.path("id").asLong();
-        String kickoffTime = UTC_FORMATTER.format(Instant.ofEpochSecond(kickoffTimestamp));
 
         System.out.println(indent(0) + league.sportName() + ", " + league.leagueName());
         System.out.println(indent(1) + matchName + ", " + kickoffTime + ", " + eventId);
@@ -114,6 +119,7 @@ public class LeonService {
         }
         System.out.println();
     }
+
 
     private String indent(int level) {
         return " ".repeat(level * 4);
