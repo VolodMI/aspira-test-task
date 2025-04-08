@@ -2,6 +2,7 @@ package com.task.leonparser.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.task.leonparser.client.LeonApiClient;
+import com.task.leonparser.config.LeonParserProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -19,10 +20,11 @@ import java.util.List;
 public class LeonService {
 
     private final LeonApiClient client;
+    private final LeonParserProperties properties;
 
-    private static final List<String> TARGET_SPORTS = List.of("Football", "Tennis", "Hockey", "Basketball");
     private static final DateTimeFormatter UTC_FORMATTER =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC);
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'")
+                    .withZone(ZoneOffset.UTC);
 
     public void startParsing() {
         client.getSports()
@@ -38,11 +40,20 @@ public class LeonService {
             return Flux.empty();
         }
 
+        List<String> targetSports = properties.getTargetSports();
+        boolean topLeaguesOnly = properties.isTopLeaguesOnly();
+
         return Flux.fromIterable(sportsJson)
-                .filter(sport -> TARGET_SPORTS.contains(sport.path("name").asText()))
+                .filter(sport -> targetSports.contains(sport.path("name").asText()))
                 .flatMap(sport -> Flux.fromIterable(sport.path("regions"))
                         .flatMap(region -> Flux.fromIterable(region.path("leagues"))
-                                .filter(league -> league.path("top").asBoolean())
+                                .filter(league -> {
+                                    if (topLeaguesOnly) {
+                                        return league.path("top").asBoolean();
+                                    } else {
+                                        return true;
+                                    }
+                                })
                                 .map(league -> buildLeagueNode(sport, league))
                         )
                 );
@@ -62,7 +73,7 @@ public class LeonService {
                     JsonNode events = json.path("events");
                     return (events.isArray()) ? Flux.fromIterable(events) : Flux.empty();
                 })
-                .take(2)
+                .take(properties.getMatchesLimit())
                 .flatMap(event -> {
                     long eventId = event.path("id").asLong();
                     return client.getFullEventInfo(eventId)
