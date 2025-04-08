@@ -9,7 +9,12 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -25,14 +30,32 @@ public class LeonService {
     private static final DateTimeFormatter UTC_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'")
                     .withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter FILE_DATE_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+    private BufferedWriter writer;
 
     public void startParsing() {
-        client.getSports()
-                .flatMapMany(this::parseSportsJson)
-                .flatMap(this::processLeague, 3)
-                .doOnComplete(() -> log.info("Parsing completed!"))
-                .onErrorContinue((error, obj) -> log.error("Error during parsing: {}", error.getMessage()))
-                .subscribe();
+        String today = LocalDate.now().format(FILE_DATE_FORMATTER);
+        String outputFolder = properties.getOutputFolder();
+        String fileName = outputFolder + "output-" + today + ".txt";
+
+        new File(outputFolder).mkdirs();
+
+        try (BufferedWriter bufferedWriter = new BufferedWriter(new FileWriter(fileName))) {
+            this.writer = bufferedWriter;
+
+            client.getSports()
+                    .flatMapMany(this::parseSportsJson)
+                    .flatMap(this::processLeague, 3)
+                    .doOnComplete(() -> {
+                        log.info("Parsing completed! Output file: {}", fileName);
+                    })
+                    .onErrorContinue((error, obj) -> log.error("Error during parsing: {}", error.getMessage()))
+                    .blockLast();
+        } catch (IOException e) {
+            log.error("Failed to write to file: {}", e.getMessage());
+        }
     }
 
     private Flux<LeagueNode> parseSportsJson(JsonNode sportsJson) {
@@ -86,33 +109,42 @@ public class LeonService {
     }
 
     private void printEvent(LeagueNode league, JsonNode event) {
-        String matchName = event.path("name").asText();
-        long kickoffTimestamp = event.path("kickoff").asLong();
-        long eventId = event.path("id").asLong();
-        String kickoffTime = UTC_FORMATTER.format(Instant.ofEpochSecond(kickoffTimestamp));
+        try {
+            String matchName = event.path("name").asText();
+            long kickoffTimestamp = event.path("kickoff").asLong();
+            long eventId = event.path("id").asLong();
+            String kickoffTime = UTC_FORMATTER.format(Instant.ofEpochSecond(kickoffTimestamp));
 
-        System.out.println(indent(0) + league.sportName() + ", " + league.leagueName());
-        System.out.println(indent(1) + matchName + ", " + kickoffTime + ", " + eventId);
+            writer.write(indent(0) + league.sportName() + ", " + league.leagueName());
+            writer.newLine();
+            writer.write(indent(1) + matchName + ", " + kickoffTime + ", " + eventId);
+            writer.newLine();
 
-        JsonNode markets = event.path("markets");
-        if (markets.isArray()) {
-            for (JsonNode market : markets) {
-                String marketName = market.path("name").asText();
-                System.out.println(indent(2) + marketName);
+            JsonNode markets = event.path("markets");
+            if (markets.isArray()) {
+                for (JsonNode market : markets) {
+                    String marketName = market.path("name").asText();
+                    writer.write(indent(2) + marketName);
+                    writer.newLine();
 
-                JsonNode runners = market.path("runners");
-                if (runners.isArray()) {
-                    for (JsonNode runner : runners) {
-                        String outcomeName = runner.path("name").asText();
-                        double price = runner.path("price").asDouble();
-                        long outcomeId = runner.path("id").asLong();
+                    JsonNode runners = market.path("runners");
+                    if (runners.isArray()) {
+                        for (JsonNode runner : runners) {
+                            String outcomeName = runner.path("name").asText();
+                            double price = runner.path("price").asDouble();
+                            long outcomeId = runner.path("id").asLong();
 
-                        System.out.println(indent(3) + outcomeName + ", " + price + ", " + outcomeId);
+                            writer.write(indent(3) + outcomeName + ", " + price + ", " + outcomeId);
+                            writer.newLine();
+                        }
                     }
                 }
             }
+            writer.newLine();
+            writer.flush();
+        } catch (IOException e) {
+            log.error("Failed to write event to file: {}", e.getMessage());
         }
-        System.out.println();
     }
 
     private String indent(int level) {

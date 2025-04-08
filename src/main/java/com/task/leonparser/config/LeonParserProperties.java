@@ -15,4 +15,5 @@ public class LeonParserProperties {
     private List<String> targetSports;
     private int matchesLimit;
     private boolean topLeaguesOnly;
+    private String outputFolder;
 }

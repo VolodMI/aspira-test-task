@@ -13,7 +13,7 @@ public class LeonApiClient {
     public LeonApiClient() {
         this.webClient = WebClient.builder()
                 .baseUrl("https://leonbets.com/api-2/betline")
-                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(10 * 1024 * 1024)) // 10 MB buffer
+                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(10 * 1024 * 1024))
                 .defaultHeader("User-Agent", "Mozilla/5.0 (compatible; LeonScraper/1.0)")
                 .build();
     }
