@@ -1,6 +1,5 @@
 Test assignment for Aspira company.
 
-Overview
 This project is a solution for a Java Developer test task.
 
 Technologies Used
