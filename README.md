@@ -14,6 +14,7 @@ Here you can see 4 branches.
 - write-in-file - the same, only with a record in the file
 - executors-service - ExecutorsService is used.
 - alternative-version-with-mapping - An alternative approach using models and mapping (Jackson)
+- concurrent-version - java.util.concurrent. is used.
 
 Result example:
 ![Screenshot 2025-04-08 221714](https://github.com/user-attachments/assets/aea09ef9-c425-48d6-998f-8dfc1502da1d)
