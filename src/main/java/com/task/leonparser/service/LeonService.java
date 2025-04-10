@@ -12,7 +12,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -64,7 +67,7 @@ public class LeonService {
                     all.join();
 
                     shutdownExecutor();
-                    log.info("✅ Parsing completed");
+                    log.info("Parsing completed");
                 });
     }
 
@@ -154,5 +157,6 @@ public class LeonService {
         return " ".repeat(level * 4);
     }
 
-    private record LeagueNode(String sportName, String leagueName, long leagueId) {}
+    private record LeagueNode(String sportName, String leagueName, long leagueId) {
+    }
 }
