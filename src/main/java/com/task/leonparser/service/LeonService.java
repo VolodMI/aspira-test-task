@@ -6,13 +6,13 @@ import com.task.leonparser.config.LeonParserProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.*;
 
 @Slf4j
 @Service
@@ -26,69 +26,89 @@ public class LeonService {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'")
                     .withZone(ZoneOffset.UTC);
 
+    private final ExecutorService executor = Executors.newFixedThreadPool(3);
+
     public void startParsing() {
         client.getSports()
-                .flatMapMany(this::parseSportsJson)
-                .flatMap(this::processLeague, 3)
-                .doOnComplete(() -> log.info("Parsing completed!"))
-                .onErrorContinue((error, obj) -> log.error("Error during parsing: {}", error.getMessage()))
-                .subscribe();
-    }
+                .subscribe(sportsJson -> {
+                    List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-    private Flux<LeagueNode> parseSportsJson(JsonNode sportsJson) {
-        if (sportsJson == null || !sportsJson.isArray()) {
-            return Flux.empty();
-        }
-
-        List<String> targetSports = properties.getTargetSports();
-        boolean topLeaguesOnly = properties.isTopLeaguesOnly();
-
-        return Flux.fromIterable(sportsJson)
-                .filter(sport -> targetSports.contains(sport.path("name").asText()))
-                .flatMap(sport -> Flux.fromIterable(sport.path("regions"))
-                        .flatMap(region -> Flux.fromIterable(region.path("leagues"))
-                                .filter(league -> {
-                                    if (topLeaguesOnly) {
-                                        return league.path("top").asBoolean();
-                                    } else {
-                                        return true;
+                    if (sportsJson.isArray()) {
+                        for (JsonNode sport : sportsJson) {
+                            String sportName = sport.path("name").asText();
+                            if (properties.getTargetSports().contains(sportName)) {
+                                JsonNode regions = sport.path("regions");
+                                if (regions.isArray()) {
+                                    for (JsonNode region : regions) {
+                                        JsonNode leagues = region.path("leagues");
+                                        if (leagues.isArray()) {
+                                            for (JsonNode league : leagues) {
+                                                boolean isTop = league.path("top").asBoolean();
+                                                if (!properties.isTopLeaguesOnly() || isTop) {
+                                                    LeagueNode leagueNode = new LeagueNode(
+                                                            sportName,
+                                                            league.path("name").asText(),
+                                                            league.path("id").asLong()
+                                                    );
+                                                    futures.add(processLeagueAsync(leagueNode));
+                                                }
+                                            }
+                                        }
                                     }
-                                })
-                                .map(league -> buildLeagueNode(sport, league))
-                        )
-                );
+                                }
+                            }
+                        }
+                    }
+
+                    CompletableFuture<Void> all = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+                    all.join();
+
+                    shutdownExecutor();
+                    log.info("✅ Parsing completed");
+                });
     }
 
-    private LeagueNode buildLeagueNode(JsonNode sportNode, JsonNode leagueNode) {
-        return new LeagueNode(
-                sportNode.path("name").asText(),
-                leagueNode.path("name").asText(),
-                leagueNode.path("id").asLong()
-        );
+    private CompletableFuture<Void> processLeagueAsync(LeagueNode league) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return client.getMatchesByLeague(league.leagueId()).block();
+            } catch (Exception e) {
+                log.error("Failed to load matches for league {}", league, e);
+                return null;
+            }
+        }, executor).thenAccept(matchesJson -> {
+            if (matchesJson != null) {
+                JsonNode events = matchesJson.path("events");
+                if (events.isArray()) {
+                    int count = 0;
+                    for (JsonNode event : events) {
+                        if (count++ >= properties.getMatchesLimit()) break;
+                        long eventId = event.path("id").asLong();
+                        processEventAsync(league, eventId);
+                    }
+                }
+            }
+        });
     }
 
-    private Flux<Void> processLeague(LeagueNode league) {
-        return client.getMatchesByLeague(league.leagueId())
-                .flatMapMany(json -> {
-                    JsonNode events = json.path("events");
-                    return (events.isArray()) ? Flux.fromIterable(events) : Flux.empty();
-                })
-                .take(properties.getMatchesLimit())
-                .flatMap(event -> {
-                    long eventId = event.path("id").asLong();
-                    return client.getFullEventInfo(eventId)
-                            .flatMap(fullEvent -> Mono.fromRunnable(() -> printEvent(league, fullEvent)).then())
-                            .onErrorResume(e -> {
-                                log.error("Failed to fetch full event info for eventId {}: {}", eventId, e.getMessage());
-                                return Mono.empty();
-                            });
-                }, 3);
+    private void processEventAsync(LeagueNode league, long eventId) {
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                return client.getFullEventInfo(eventId).block();
+            } catch (Exception e) {
+                log.error("Failed to load event info for eventId {}", eventId, e);
+                return null;
+            }
+        }, executor).thenAccept(fullEvent -> {
+            if (fullEvent != null) {
+                printEvent(league, fullEvent);
+            }
+        });
     }
 
     private void printEvent(LeagueNode league, JsonNode event) {
         String matchName = event.path("name").asText();
         long kickoffTimestamp = event.path("kickoff").asLong();
-
         Instant kickoffInstant = kickoffTimestamp > 9999999999L
                 ? Instant.ofEpochMilli(kickoffTimestamp)
                 : Instant.ofEpochSecond(kickoffTimestamp);
@@ -111,7 +131,6 @@ public class LeonService {
                         String outcomeName = runner.path("name").asText();
                         double price = runner.path("price").asDouble();
                         long outcomeId = runner.path("id").asLong();
-
                         System.out.println(indent(3) + outcomeName + ", " + price + ", " + outcomeId);
                     }
                 }
@@ -120,11 +139,20 @@ public class LeonService {
         System.out.println();
     }
 
+    private void shutdownExecutor() {
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+        }
+    }
 
     private String indent(int level) {
         return " ".repeat(level * 4);
     }
 
-    private record LeagueNode(String sportName, String leagueName, long leagueId) {
-    }
+    private record LeagueNode(String sportName, String leagueName, long leagueId) {}
 }
